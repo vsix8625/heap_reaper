@@ -1,6 +1,10 @@
 # Prerequisites
 *.d
 
+main.c
+.barr
+Barrfile
+
 # Object files
 *.o
 *.ko
