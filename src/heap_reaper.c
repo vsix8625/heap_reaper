@@ -27,6 +27,9 @@ struct reaper_ctx
 
     size_t total_bytes;
     size_t peak_bytes;
+
+    size_t total_allocs;
+    size_t total_frees;
 };
 
 //----------------
@@ -83,11 +86,14 @@ static void reaper_track_allocation_ctx(reaper_ctx *ctx, void *ptr, size_t size,
     }
 
     ctx->items[ctx->count++] = (reaper_alloc_info) {.ptr = ptr, .size = size, .tag = tag, .file = file, .line = line};
+
     ctx->total_bytes += size;
     if (ctx->total_bytes > ctx->peak_bytes)
     {
         ctx->peak_bytes = ctx->total_bytes;
     }
+
+    ctx->total_allocs += 1;
 
     reaper_mutex_unlock(ctx);
 }
@@ -107,6 +113,7 @@ static void reaper_untrack_ctx(reaper_ctx *ctx, void *ptr)
         {
             ctx->total_bytes -= ctx->items[i].size;
             ctx->items[i] = ctx->items[--ctx->count];  // keep list in order
+            ctx->total_frees += 1;
             break;
         }
     }
@@ -118,7 +125,7 @@ static void reaper_untrack_ctx(reaper_ctx *ctx, void *ptr)
 // Context management
 //----------------
 
-bool reaper_ctx_init(reaper_ctx *ctx, const char *name, bool thread_safe)
+static bool reaper_init_ctx(reaper_ctx *ctx, const char *name, bool thread_safe)
 {
     if (ctx == NULL)
     {
@@ -135,7 +142,7 @@ bool reaper_ctx_init(reaper_ctx *ctx, const char *name, bool thread_safe)
     return true;
 }
 
-void reaper_ctx_destroy(reaper_ctx *ctx)
+static void reaper_reset_ctx(reaper_ctx *ctx)
 {
     if (ctx == NULL)
     {
@@ -154,6 +161,55 @@ void reaper_ctx_destroy(reaper_ctx *ctx)
     }
 }
 
+reaper_ctx *reaper_create_ctx(const char *name, bool thread_safe)
+{
+    reaper_ctx *ctx = malloc(sizeof(reaper_ctx));
+    if (ctx == NULL)
+    {
+        return NULL;
+    }
+
+    if (!reaper_init_ctx(ctx, name, thread_safe))
+    {
+        free(ctx);
+        return NULL;
+    }
+
+    return ctx;
+}
+
+void reaper_destroy_ctx(reaper_ctx *ctx)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    reaper_reset_ctx(ctx);
+    free(ctx);
+}
+
+size_t reaper_ctx_total_bytes(const reaper_ctx *ctx)
+{
+    if (!ctx)
+        return 0;
+    return ctx->total_bytes;
+}
+
+size_t reaper_ctx_peak_bytes(const reaper_ctx *ctx)
+{
+    if (!ctx)
+        return 0;
+    return ctx->peak_bytes;
+}
+
+const char *reaper_ctx_name(const reaper_ctx *ctx)
+{
+    if (!ctx)
+        return NULL;
+    return ctx->name;
+}
+
 //----------------
 // GLOBAL context
 //----------------
@@ -162,12 +218,12 @@ static reaper_ctx g_reaper_global_ctx;
 
 bool reaper_init(void)
 {
-    return reaper_ctx_init(&g_reaper_global_ctx, "global", true);
+    return reaper_init_ctx(&g_reaper_global_ctx, "global_ctx", true);
 }
 
 void reaper_shutdown(void)
 {
-    reaper_ctx_destroy(&g_reaper_global_ctx);
+    reaper_reset_ctx(&g_reaper_global_ctx);
 }
 
 void reaper_destroy_tag(const char *tag)
@@ -184,8 +240,12 @@ void reaper_destroy_tag(const char *tag)
         reaper_alloc_info *info = &g_reaper_global_ctx.items[i];
         if (info->tag && strcmp(info->tag, tag) == 0)
         {
-            free(info->ptr);
-            g_reaper_global_ctx.total_bytes -= info->size;
+            if (info->ptr)
+            {
+                free(info->ptr);
+                g_reaper_global_ctx.total_bytes -= info->size;
+                info->ptr = NULL;
+            }
             g_reaper_global_ctx.items[i] = g_reaper_global_ctx.items[--g_reaper_global_ctx.count];
             continue;
         }
@@ -251,32 +311,36 @@ void *reaper_realloc_ctx(reaper_ctx *ctx, void *ptr, size_t size)
     {
         size = 1;
     }
-    void *new_ptr = malloc(size);
+
+    reaper_mutex_lock(ctx);
+
+    const char *tag = NULL;
+    size_t old_size = 0;
+    for (size_t i = ctx->count; i-- > 0;)
+    {
+        if (ctx->items[i].ptr == ptr)
+        {
+            old_size = ctx->items[i].size;
+            tag = ctx->items[i].tag;  // preserve the original tag
+            break;
+        }
+    }
+    reaper_mutex_unlock(ctx);
+
+    void *new_ptr = reaper_malloc_ctx(ctx, size, tag);  // track new allocation properly
 
     if (new_ptr == NULL)
     {
-        fprintf(stderr, "%s: failed to malloc %zu bytes", __func__, size);
+        fprintf(stderr, "%s: failed to malloc %zu bytes\n", __func__, size);
         return NULL;
     }
 
     if (ptr)
     {
-        reaper_mutex_lock(ctx);
-        size_t old_size = 0;
-        for (size_t i = ctx->count; i-- > 0;)
-        {
-            if (ctx->items[i].ptr == ptr)
-            {
-                old_size = ctx->items[i].size;
-                break;
-            }
-        }
-        reaper_mutex_unlock(ctx);
-
         memcpy(new_ptr, ptr, old_size < size ? old_size : size);
         reaper_free_ctx(ctx, ptr);
     }
-    reaper_track_allocation_ctx(ctx, new_ptr, size, NULL, NULL, 0);
+
     return new_ptr;
 }
 
@@ -305,14 +369,14 @@ char *reaper_strdup_ctx(reaper_ctx *ctx, const char *s, const char *tag)
 // -------------------------
 // Global alloc macros
 // -------------------------
-void *reaper_malloc(size_t size, const char *tag)
+void *reaper_malloc(size_t size)
 {
-    return reaper_malloc_ctx(&g_reaper_global_ctx, size, tag);
+    return reaper_malloc_ctx(&g_reaper_global_ctx, size, "global");
 }
 
-void *reaper_calloc(size_t n, size_t size, const char *tag)
+void *reaper_calloc(size_t n, size_t size)
 {
-    return reaper_calloc_ctx(&g_reaper_global_ctx, n, size, tag);
+    return reaper_calloc_ctx(&g_reaper_global_ctx, n, size, "global");
 }
 
 void *reaper_realloc(void *ptr, size_t size)
@@ -325,9 +389,9 @@ void reaper_free(void *ptr)
     reaper_free_ctx(&g_reaper_global_ctx, ptr);
 }
 
-char *reaper_strdup(const char *s, const char *tag)
+char *reaper_strdup(const char *s)
 {
-    return reaper_strdup_ctx(&g_reaper_global_ctx, s, tag);
+    return reaper_strdup_ctx(&g_reaper_global_ctx, s, "global");
 }
 
 // -------------------------
@@ -346,6 +410,7 @@ void reaper_collect_all(reaper_ctx *ctx)
         if (ctx->items[i].ptr)
         {
             free(ctx->items[i].ptr);
+            ctx->total_frees += 1;
         }
     }
     ctx->count = 0;
@@ -370,6 +435,7 @@ void reaper_collect_tag_ctx(reaper_ctx *ctx, const char *tag)
             if (info->ptr)
             {
                 free(info->ptr);
+                ctx->total_frees += 1;
             }
             ctx->total_bytes -= info->size;
             ctx->items[i] = ctx->items[--ctx->count];
@@ -406,4 +472,90 @@ void reaper_dump_ctx(const reaper_ctx *ctx)
         const reaper_alloc_info *info = &ctx->items[i];
         printf("[%zu] %p (%zu bytes) tag=%s\n", i, info->ptr, info->size, info->tag ? info->tag : "N/A");
     }
+}
+
+void reaper_dump_ctx_file(const reaper_ctx *ctx, const char *filename)
+{
+    if (ctx == NULL || filename == NULL)
+    {
+        return;
+    }
+
+    FILE *fp = fopen(filename, "w");
+    if (fp == NULL)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < ctx->count; ++i)
+    {
+        const reaper_alloc_info *info = &ctx->items[i];
+        fprintf(fp, "[%zu]: %p (%zu bytes) context_name=%s tag=%s\n", i, info->ptr, info->size, ctx->name, info->tag);
+    }
+
+    fclose(fp);
+}
+
+void reaper_dump_glob_file(void)
+{
+    reaper_dump_ctx_file(&g_reaper_global_ctx, "reaper_global_dump.txt");
+}
+
+// stats
+
+reaper_stats reaper_get_stats(reaper_ctx *ctx)
+{
+    reaper_stats stats = {0};
+
+    if (ctx == NULL)
+    {
+        return stats;
+    }
+
+    reaper_mutex_lock(ctx);
+
+    stats.total_bytes = ctx->total_bytes;
+    stats.peak_bytes = ctx->peak_bytes;
+
+    for (size_t i = 0; i < ctx->count; ++i)
+    {
+        if (ctx->items[i].ptr)
+        {
+            stats.active_count += 1;
+            if (ctx->items[i].size > stats.largest_alloc)
+            {
+                stats.largest_alloc = ctx->items[i].size;
+            }
+        }
+    }
+
+    stats.total_allocs = ctx->total_allocs;
+    stats.total_frees = ctx->total_frees;
+
+    reaper_mutex_unlock(ctx);
+    return stats;
+}
+
+void reaper_print_stats(const reaper_ctx *ctx)
+{
+    if (ctx == NULL)
+    {
+        ctx = &g_reaper_global_ctx;
+    }
+
+    reaper_mutex_lock((reaper_ctx *) ctx);
+
+    size_t active_allocs = ctx->count;
+    size_t active_bytes = ctx->total_bytes;
+
+    printf("\n--------------------------------------------------------------------------------\n\n");
+    printf("Heap Reaper stats for context: %s\n", ctx->name ? ctx->name : "global");
+    printf("  Active allocations: %zu\n", active_allocs);
+    printf("  Active bytes:       %zu\n", active_bytes);
+    printf("  Peak bytes:         %zu\n", ctx->peak_bytes);
+    printf("  Total allocs:       %zu\n", ctx->total_allocs);
+    printf("  Total frees:        %zu\n", ctx->total_frees);
+    printf("\n\n--------------------------------------------------------------------------------\n");
+
+    reaper_mutex_unlock((reaper_ctx *) ctx);
 }

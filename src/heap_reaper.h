@@ -11,16 +11,27 @@ extern "C"
 
     typedef struct reaper_ctx reaper_ctx;
 
+    typedef struct reaper_stats
+    {
+        size_t total_bytes;
+        size_t peak_bytes;
+        size_t active_count;
+        size_t total_allocs;
+        size_t total_frees;
+        size_t largest_alloc;
+    } reaper_stats;
+
     //----------------------------------------------------------------------------------------------------
     // -------------------------
     // Context management
     // -------------------------
 
-    // Initialize a ctx (stack-allocated or embedded)
-    bool reaper_ctx_init(reaper_ctx *ctx, const char *name, bool thread_safe);
+    reaper_ctx *reaper_create_ctx(const char *name, bool thread_safe);
+    void reaper_destroy_ctx(reaper_ctx *ctx);
 
-    // Destroy a ctx and free all its allocations
-    void reaper_ctx_destroy(reaper_ctx *ctx);
+    size_t reaper_ctx_total_bytes(const reaper_ctx *ctx);
+    size_t reaper_ctx_peak_bytes(const reaper_ctx *ctx);
+    const char *reaper_ctx_name(const reaper_ctx *ctx);
 
     // -------------------------
     // Global ctx
@@ -32,11 +43,11 @@ extern "C"
     // -------------------------
     // Allocations (global ctx by default)
     // -------------------------
-    void *reaper_malloc(size_t size, const char *tag);
-    void *reaper_calloc(size_t n, size_t size, const char *tag);
+    void *reaper_malloc(size_t size);
+    void *reaper_calloc(size_t n, size_t size);
     void *reaper_realloc(void *ptr, size_t size);
     void reaper_free(void *ptr);
-    char *reaper_strdup(const char *s, const char *tag);
+    char *reaper_strdup(const char *s);
 
     // -------------------------
     // Allocations (specific ctx)
@@ -58,6 +69,12 @@ extern "C"
     // -------------------------
     void reaper_dump_glob(void);
     void reaper_dump_ctx(const reaper_ctx *ctx);
+
+    void reaper_dump_ctx_file(const reaper_ctx *ctx, const char *filename);
+    void reaper_dump_glob_file(void);
+
+    reaper_stats reaper_get_stats(reaper_ctx *ctx);
+    void reaper_print_stats(const reaper_ctx *ctx);
 
     //----------------------------------------------------------------------------------------------------
 

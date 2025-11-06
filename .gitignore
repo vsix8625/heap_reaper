@@ -2,7 +2,6 @@
 *.d
 
 build/
-main.c
 .barr
 Barrfile
 
