@@ -4,7 +4,7 @@
 #include <string.h>
 #include <time.h>
 
-#define ALLOC_COUNT 10000
+#define ALLOC_COUNT 200
 #define TAG_COUNT 5
 
 static const char *tags[TAG_COUNT] = {"rendering", "physics", "audio", "ui", "global"};
@@ -99,9 +99,13 @@ int main(void)
         if (r == 0)  // free
         {
             if (recs[i].is_ctx)
+            {
                 reaper_free_ctx(app_ctx, recs[i].ptr);
+            }
             else
+            {
                 reaper_free(recs[i].ptr);
+            }
 
             recs[i].ptr = NULL;
         }

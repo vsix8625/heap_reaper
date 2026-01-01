@@ -164,6 +164,7 @@ static void reaper_reset_ctx(reaper_ctx *ctx)
 reaper_ctx *reaper_create_ctx(const char *name, bool thread_safe)
 {
     reaper_ctx *ctx = malloc(sizeof(reaper_ctx));
+
     if (ctx == NULL)
     {
         return NULL;
@@ -191,22 +192,28 @@ void reaper_destroy_ctx(reaper_ctx *ctx)
 
 size_t reaper_ctx_total_bytes(const reaper_ctx *ctx)
 {
-    if (!ctx)
+    if (ctx == NULL)
+    {
         return 0;
+    }
     return ctx->total_bytes;
 }
 
 size_t reaper_ctx_peak_bytes(const reaper_ctx *ctx)
 {
-    if (!ctx)
+    if (ctx == NULL)
+    {
         return 0;
+    }
     return ctx->peak_bytes;
 }
 
 const char *reaper_ctx_name(const reaper_ctx *ctx)
 {
-    if (!ctx)
+    if (ctx == NULL)
+    {
         return NULL;
+    }
     return ctx->name;
 }
 
